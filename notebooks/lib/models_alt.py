@@ -24,17 +24,17 @@ class base_model(object):
     def predict(self, data, labels=None, sess=None):
         loss = 0
         size = data.shape[0]
-        predictions = np.empty((size,data.shape[1]))
+        predictions = np.empty((size, data.shape[1]))
         sess = self._get_session(sess)
         for begin in range(0, size, self.batch_size):
             end = begin + self.batch_size
             end = min([end, size])
 
             batch_data = np.zeros((self.batch_size, data.shape[1]))
-            tmp_data = data[begin:end,:]
+            tmp_data = data[begin:end, :]
             if type(tmp_data) is not np.ndarray:
                 tmp_data = tmp_data.toarray()  # convert sparse matrices
-            batch_data[:end-begin] = tmp_data
+            batch_data[:end-begin, :] = tmp_data
             feed_dict = {self.ph_data: batch_data, self.ph_dropout: 1}
 
             # Compute loss if labels are given.
@@ -70,12 +70,16 @@ class base_model(object):
         """
         t_process, t_wall = time.process_time(), time.time()
         predictions, loss = self.predict(data, labels, sess)
-        string = 'loss: {:.2e}'.format(loss)
+        predictions[predictions > predictions.mean(axis=1)[:, np.newaxis]] = 1
+        predictions[predictions <= predictions.mean(axis=1)[:, np.newaxis]] = -1
+        accuracy = 100 * sum(sum(predictions == labels))/ np.size(labels)
+        string = 'loss: {:.2e}, accuracy: {:.2f}'.format(loss, accuracy)
         if sess is None:
             string += '\ntime: {:.0f}s (wall {:.0f}s)'.format(time.process_time()-t_process, time.time()-t_wall)
-        return string, loss
+        
+        return string, loss, accuracy
 
-    def fit(self, train_data, train_labels, val_data, val_labels):
+    def fit(self, train_data, train_labels, val_data, val_labels, print_flag):
         t_process, t_wall = time.process_time(), time.time()
         sess = tf.Session(graph=self.graph)
         shutil.rmtree(self._get_path('summaries'), ignore_errors=True)
@@ -88,6 +92,8 @@ class base_model(object):
         # Training.
         val_losses = []
         train_losses = []
+        val_accs = []
+        train_accs = []
         indices = collections.deque()
         num_steps = int(self.num_epochs * train_data.shape[0] / self.batch_size)
         for step in range(1, num_steps+1):
@@ -97,7 +103,7 @@ class base_model(object):
                 indices.extend(np.random.permutation(train_data.shape[0]))
             idx = [indices.popleft() for i in range(self.batch_size)]
 
-            batch_data, batch_labels = train_data[idx,:], train_labels[idx]
+            batch_data, batch_labels = train_data[idx,:], train_labels[idx, :]
             if type(batch_data) is not np.ndarray:
                 batch_data = batch_data.toarray()  # convert sparse matrices
             feed_dict = {self.ph_data: batch_data, self.ph_labels: batch_labels, self.ph_dropout: self.dropout}
@@ -106,29 +112,36 @@ class base_model(object):
             # Periodical evaluation of the model.
             if step % self.eval_frequency == 0 or step == num_steps:
                 epoch = step * self.batch_size / train_data.shape[0]
-                print('step {} / {} (epoch {:.2f} / {}):'.format (step, num_steps, epoch, self.num_epochs))
-                print('  learning_rate = {:.2e}, loss_average = {:.2e}'.format(learning_rate, loss_average))
-                string, loss = self.evaluate(val_data, val_labels, sess)
-                val_losses.append(loss)
-                train_losses.append(loss_average)
-                print('  validation {}'.format(string))
-                print('  time: {:.0f}s (wall {:.0f}s)'.format(time.process_time()-t_process, time.time()-t_wall))
+                if print_flag:
+                    print('step {} / {} (epoch {:.2f} / {}):'.format (step, num_steps, epoch, self.num_epochs))
+                    print('  learning_rate = {:.2e}, loss_average = {:.2e}'.format(learning_rate, loss_average))
+                string_train, loss_train, acc_train = self.evaluate(train_data, train_labels, sess)
+                string_val, loss_val, acc_val = self.evaluate(val_data, val_labels, sess)
+                val_losses.append(loss_val)
+                train_losses.append(loss_train)
+                train_accs.append(acc_train)
+                val_accs.append(acc_val)
+                if print_flag:
+                    print('  train {}'.format(string_train))
+                    print('  validation {}'.format(string_val))
+                    print('  time: {:.0f}s (wall {:.0f}s)'.format(time.process_time()-t_process, time.time()-t_wall))
 
                 # Summaries for TensorBoard.
                 summary = tf.Summary()
                 summary.ParseFromString(sess.run(self.op_summary, feed_dict))
-                summary.value.add(tag='validation/loss', simple_value=loss)
+                summary.value.add(tag='validation/loss', simple_value=loss_val)
+                summary.value.add(tag='train/loss', simple_value=loss_train)
                 writer.add_summary(summary, step)
 
                 # Save model parameters (for evaluation).
                 self.op_saver.save(sess, path, global_step=step)
-
-        print('validation loss: peak = {:.2f}, mean = {:.2f}'.format(min(val_losses), np.mean(val_losses[-10:])))
+        if print_flag:
+            print('validation loss: peak = {:.2f}, mean = {:.2f}'.format(min(val_losses), np.mean(val_losses[-10:])))
         writer.close()
         sess.close()
 
         t_step = (time.time() - t_wall) / num_steps
-        return train_losses, val_losses, t_step
+        return train_losses, val_losses, train_accs, val_accs, t_step
 
     def get_var(self, name):
         sess = self._get_session()
@@ -193,7 +206,7 @@ class base_model(object):
         """Adds to the inference model the layers required to generate loss."""
         with tf.name_scope('loss'):
             with tf.name_scope('mse'):
-                mse = tf.losses.mean_squared_error(predictions=logits, labels=labels) 
+                mse = tf.losses.mean_squared_error(predictions=logits, labels=labels)
             with tf.name_scope('regularization'):
                 regularization *= tf.add_n(self.regularizers)
             loss = mse + regularization
@@ -564,7 +577,8 @@ class cgcnn2_4(base_model):
         with tf.name_scope('gconv1'):
             N, M = x.get_shape()  # N: number of samples, M: number of features
             M = int(M)
-            # Filter
+            # 
+            
             W = self._weight_variable([self.K, self.F])
             def filter(xt, k):
                 xt = tf.transpose(xt)  # N x M
@@ -747,7 +761,6 @@ class cgcnn(base_model):
             self.L.append(L[j])
             j += int(np.log2(pp)) if pp > 1 else 0
         L = self.L
-
         # Print information about NN architecture.
         Ngconv = len(p)
         Nfc = len(M)
@@ -766,7 +779,7 @@ class cgcnn(base_model):
                 print('    biases: M_{0} * F_{0} = {1} * {2} = {3}'.format(
                         i+1, L[i].shape[0], F[i], L[i].shape[0]*F[i]))
         for i in range(Nfc):
-            name = 'logits (softmax)' if i == Nfc-1 else 'fc{}'.format(i+1)
+            name = 'logits' if i == Nfc-1 else 'fc{}'.format(i+1)
             print('  layer {}: {}'.format(Ngconv+i+1, name))
             print('    representation: M_{} = {}'.format(Ngconv+i+1, M[i]))
             M_last = M[i-1] if i > 0 else M_0 if Ngconv == 0 else L[-1].shape[0] * F[-1] // p[-1]
