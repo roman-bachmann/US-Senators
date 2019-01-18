@@ -1,4 +1,4 @@
-# Learning US senate voting behavior from bill sponsorship profiles
+# Learning US Senate voting behavior from bill sponsorship profiles
 Final project of the EPFL EE-558 Network Tour of Data Science class
 
 ## Overview
