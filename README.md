@@ -1,6 +1,11 @@
 # Learning US Senate voting behavior from bill sponsorship profiles
 Final project of the EPFL EE-558 Network Tour of Data Science class
 
+Students:
+* Team: `Team 2`
+* Students: `Michael Allemann, Roman Bachmann, Liamarcia Bifano, Virginia Bordignon`
+* Dataset: `US Senators`
+
 ## Overview
 Our code is organized as such:
 
